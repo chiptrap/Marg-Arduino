@@ -1,0 +1,521 @@
+#include <Keypad.h>
+#include <U8g2lib.h>
+#include <PubSubClient.h>
+#include <WiFi.h>
+#include <SPI.h>
+#include <ESPmDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
+#include <FastLED.h>
+#define ROWS 4
+#define COLS 4
+// Hall effect sensor pins
+const int hallPins[] = {12, 2, 27, 32, 15, 16 };
+const int numSensors = sizeof(hallPins) / sizeof(hallPins[0]);
+int lastHallStates[numSensors]; // Array to store the last state of each sensor
+
+#define NUM_LEDS 1
+#define DATA_PIN 5
+CRGB leds[NUM_LEDS];
+
+const char* ssid = "Control booth";
+const char* password = "MontyLives";
+const char* mqtt_server = "192.168.86.102";
+#define mqtt_port 1883
+#define MQTT_USER ""
+#define MQTT_PASSWORD ""
+#define MQTT_SERIAL_PUBLISH_CH "/icircuit/ESP32/serialdata/tx"
+#define MQTT_SERIAL_RECEIVER_CH "/icircuit/ESP32/serialdata/rx"
+unsigned long previousMillis = 0;
+const long interval = 10000;           // interval at which to send mqtt watchdog (milliseconds)
+
+bool usingSpiBus = false; //Change to true if using spi bus
+//Base notifications
+const char* hostName = "Esp32_EPObox"; // Set your controller unique name here
+const char* quitMessage = ("______ force quitting...");
+const char* onlineMessage = ("________ Online");
+const char* watchdogMessage = "Esp32_EPO Watchdog";
+
+//mqtt Topics
+#define NUM_SUBSCRIPTIONS 1//Must set to match Qty in subscribeChannel below
+const char* mainPublishChannel = "/Renegade/Room1/"; //typically /Renegade/Room1/ or /Renegade/Engineering/
+const char* dataChannel = "/Renegade/Engineering/Test/";
+const char* dataChannel2 = "/Renegade/Engineering/Test/Health/";
+const char* watchdogChannel = "/Renegade/Engineering/Test/";
+const char* subscribeChannel[NUM_SUBSCRIPTIONS] = {
+  "/Renegade/Room1/EPO/",
+  //"myTopic0",
+  //"myTopic1",
+  //more subscriptions can be added here, separated by commas
+};
+
+WiFiClient wifiClient;
+PubSubClient client(wifiClient);
+boolean modeActive = false;
+boolean quit = false;
+//-----------------------------------------------------------End Header-----------------------------------------------------------
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  payload[length] = '\0';
+  String message = (char*)payload;
+  Serial.println("-------new message from broker-----");
+  Serial.print("channel:");
+  Serial.println(topic);
+  Serial.print("data:");
+  Serial.write(payload, length);
+  Serial.println();
+
+  if (message == "quit" && modeActive) {
+    client.publish(mainPublishChannel, quitMessage);
+    quit = true;
+  }
+   else if (message == "CheckWiFi") {     
+     connectToStrongestWiFi();
+     publishWiFiInfo();
+    } 
+  if (!modeActive) {
+
+    if (message == "disableEPO") {
+      
+      setDisabledMode(true);
+      quit = false;
+      modeActive = false;
+
+    } else if (message == "enableEPO") {
+      setDisabledMode(false);
+      resetScreenAndKeypad();
+      //add more modes here
+      quit = false;
+      modeActive = false;
+    }
+ else if (message == "resetEPO") {
+      setDisabledMode(false);
+      resetScreenAndKeypad();
+    }
+  }
+
+}
+byte rowPins[ROWS] = {14, 33, 25, 26};
+byte colPins[COLS] = {18, 19, 17, 13};
+
+char keys[ROWS][COLS] = {
+  {'1', '4', '7', '*'},
+  {'2', '5', '8', '0'},
+  {'3', '6', '9', '#'},
+  {'A', 'B', 'C', 'D'}
+}; 
+
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+char enteredDigits[4] = {' ', ' ', ' ', ' '};
+int digitCount = 0;
+bool disabledMode = false; // Controlled via MQTT now
+
+const char correctCode[] = "CD98"; // Change as needed
+
+void drawPentagon(int x, int y) {
+  int size = 10;
+  u8g2.drawLine(x, y - size, x - size, y - size / 3);
+  u8g2.drawLine(x - size, y - size / 3, x - size / 2, y + size);
+  u8g2.drawLine(x - size / 2, y + size, x + size / 2, y + size);
+  u8g2.drawLine(x + size / 2, y + size, x + size, y - size / 3);
+  u8g2.drawLine(x + size, y - size / 3, x, y - size);
+}
+
+void drawScreen() {
+  if (disabledMode) {
+    u8g2.clearBuffer();
+    u8g2.sendBuffer();
+    return;
+  }
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB18_tf);
+
+  int xPos[4] = {24, 52, 80, 108};
+  int yPos = 40;
+
+  for (int i = 0; i < 4; i++) {
+    if (enteredDigits[i] == ' ') {
+      switch (i) {
+        case 0: drawPentagon(xPos[i], yPos); break;
+        case 1: u8g2.drawFrame(xPos[i] - 10, yPos - 10, 20, 20); break;
+        case 2: u8g2.drawCircle(xPos[i], yPos, 10); break;
+        case 3: u8g2.drawLine(xPos[i], yPos - 10, xPos[i] - 10, yPos + 10);
+  u8g2.drawLine(xPos[i] - 10, yPos + 10, xPos[i] + 10, yPos + 10);
+  u8g2.drawLine(xPos[i] + 10, yPos + 10, xPos[i], yPos - 10);
+  break;
+      }
+    } else {
+      u8g2.setCursor(xPos[i] - 5, yPos + 6);
+      u8g2.print(enteredDigits[i]);
+    }
+  }
+
+  u8g2.sendBuffer();
+}
+
+void flashMessage(const char* line1, const char* line2, int flashes, bool hold) {
+  int screenWidth = u8g2.getDisplayWidth(); // Get screen width
+
+  for (int i = 0; i < flashes; i++) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB10_tf); // Set font *before* measuring width
+
+    // Calculate centered x position for line 1
+    int x1 = (screenWidth - u8g2.getStrWidth(line1)) / 2;
+    u8g2.setCursor(x1, 25); // Use calculated x, keep y
+    u8g2.print(line1);
+
+    // Calculate centered x position for line 2
+    int x2 = (screenWidth - u8g2.getStrWidth(line2)) / 2;
+    u8g2.setCursor(x2, 45); // Use calculated x, keep y
+    u8g2.print(line2);
+
+    u8g2.sendBuffer();
+    delay(500);
+
+    u8g2.clearBuffer();
+    u8g2.sendBuffer();
+    delay(500);
+  }
+
+  if (hold) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB10_tf); // Set font *before* measuring width
+
+    // Calculate centered x position for line 1
+    int x1 = (screenWidth - u8g2.getStrWidth(line1)) / 2;
+    u8g2.setCursor(x1, 25); // Use calculated x, keep y
+    u8g2.print(line1);
+
+    // Calculate centered x position for line 2
+    int x2 = (screenWidth - u8g2.getStrWidth(line2)) / 2;
+    u8g2.setCursor(x2, 45); // Use calculated x, keep y
+    u8g2.print(line2);
+
+    u8g2.sendBuffer();
+  }
+}
+
+void setDisabledMode(bool state) {
+  disabledMode = state;
+  drawScreen();
+}
+
+void setup() {
+   // FastLED setup
+  FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.setBrightness(255);
+  fill_solid(leds, NUM_LEDS, CRGB::Red);
+    FastLED.show();
+  Serial.begin(115200);
+  //------------------------------------------------------Wifi------------------------------------------------------
+  Serial.setTimeout(500);  // Set time out for 
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+  WiFi.mode(WIFI_STA);
+  delay(10); 
+  connectToStrongestWiFi();
+  //-----Start MQTT----------------
+  //reconnectMQTT(); This is handled inside connectToStrongestWiFi()
+  //---------------OTA Setup------------------------
+  // Port defaults to 3232
+  // ArduinoOTA.setPort(3232);
+for (int i = 0; i < numSensors; i++) {
+        pinMode(hallPins[i], INPUT_PULLUP);
+        lastHallStates[i] = digitalRead(hallPins[i]); // Initialize last states
+    }
+
+  // Hostname defaults to esp3232-[MAC]
+  ArduinoOTA.setHostname(hostName);
+
+  // No authentication by default
+  // ArduinoOTA.setPassword("admin");
+
+  // Password can be set with it's md5 value as well
+  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
+  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
+
+  ArduinoOTA
+  .onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH)
+      type = "sketch";
+    else // U_SPIFFS
+      type = "filesystem";
+
+    // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+    Serial.println("Start updating " + type);
+  })
+  .onEnd([]() {
+    Serial.println("\nEnd");
+  })
+  .onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  })
+  .onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+
+  ArduinoOTA.begin();
+
+      Serial.println("\nConnected!");
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
+  u8g2.begin();
+  drawScreen();
+  // Initialize MQTT here and set up callback to call setDisabledMode
+}
+
+void loop() {
+   fill_solid(leds, NUM_LEDS, CRGB::Green);
+  char key = keypad.getKey();
+handleAll();
+for (int i = 0; i < numSensors; i++) {
+    int currentSensorValue = digitalRead(hallPins[i]);
+    
+    // Check if the state has changed
+    if (currentSensorValue != lastHallStates[i]) {
+        char topic[100];
+        snprintf(topic, sizeof(topic), "%s%s/hall_sensor/%d", subscribeChannel[0], hostName, hallPins[i]); // Use mainPublishChannel and hostname for uniqueness
+
+        const char* message = (currentSensorValue == LOW) ? "triggered" : "released"; // LOW means triggered due to INPUT_PULLUP
+
+        Serial.printf("Sensor on pin %d state changed to: %s\n", hallPins[i], message);
+        Serial.print("Publishing to topic: ");
+        Serial.println(topic);
+        Serial.print("Publishing message: ");
+        Serial.println(message);
+
+        // Publish the state change to the MQTT topic
+        if (client.publish(topic, message)) {
+            Serial.println("Published successfully");
+        } else {
+            Serial.println("Failed to publish");
+        }
+        
+        lastHallStates[i] = currentSensorValue; // Update the last state
+        // Removed delay(500) - only publish on change now
+    }
+}
+//  wait(1000); // Consider if this wait is necessary for your application logic
+  // Serial.println("Loop"); // Can be noisy, uncomment if needed for debugging
+  if (key) {
+    if (disabledMode || digitCount >= 4) return;
+
+    enteredDigits[digitCount] = key;
+    digitCount++;
+    drawScreen();
+
+    if (digitCount == 4) {
+      delay(500);
+      if (strncmp(enteredDigits, correctCode, 4) == 0) {
+        flashMessage("E.P.O.", "AUTHORIZED", 3, true);
+        client.publish("/Renegade/Room1/EPO/","EPO puzzle solved");
+      } else {
+        flashMessage("ACCESS", "DENIED", 3, false);
+        delay(500);
+        memset(enteredDigits, ' ', sizeof(enteredDigits));
+        digitCount = 0;
+        drawScreen();
+    
+      }
+    }
+  }
+}
+void handleAll() {
+  checkConnection();
+  ArduinoOTA.handle();
+  client.loop();
+}
+
+void reconnectMQTT() {
+  if (usingSpiBus){SPI.end();
+  }
+  // Loop until we're reconnected
+  while (!client.connected() && (WiFi.status() == WL_CONNECTED)) {
+    Serial.print("Attempting MQTT connection...");
+    byte mac[5];
+    WiFi.macAddress(mac);  // get mac address
+    String clientId = String(mac[0]) + String(mac[4]);
+    // Attempt to connect
+    if (client.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println("connected");
+      //Once connected, publish an announcement...
+      client.publish(mainPublishChannel, onlineMessage);
+      // ... and resubscribe
+      for (int i = 0; i < NUM_SUBSCRIPTIONS; i++) {
+        client.subscribe(subscribeChannel[i]);
+      }
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      wait(5000);
+    }
+  }
+  if (usingSpiBus){
+    SPI.begin();// Init SPI bus
+  }
+    
+}
+
+void checkConnection() {
+  unsigned long currentMillis = millis();
+  // if WiFi is down, try reconnecting
+  if ((WiFi.status() != WL_CONNECTED) && (currentMillis - previousMillis >= interval)) {
+    Serial.print(millis());
+    Serial.println("Reconnecting to WiFi...");    
+    connectToStrongestWiFi();   
+    previousMillis = currentMillis;
+  }
+  if ((!client.connected() ) && (WiFi.status() == WL_CONNECTED) ) {
+    Serial.println("Lost mqtt connection");
+    reconnectMQTT();
+  }
+  if ((currentMillis - previousMillis >= interval)) {
+    client.publish(watchdogChannel, watchdogMessage);
+    reportFreeHeap();
+    publishRSSI();
+    publishWiFiChannel();
+    previousMillis = currentMillis;
+
+  }
+
+}
+
+
+void wait(uint16_t msWait) {
+  uint32_t start = millis();
+  while ((millis() - start) < msWait)
+  {
+    handleAll();
+  }
+}
+
+void connectToStrongestWiFi() {
+  int n = WiFi.scanNetworks();  // Scan available networks
+
+  if (n == 0) {
+    Serial.println("No networks found");
+    return;
+  }
+
+  int strongestSignal = -1000;  // Initialize to a very low signal strength
+  String bestSSID = "";
+  String bestBSSID = "";
+
+  for (int i = 0; i < n; i++) {
+    String foundSSID = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+    String bssid = WiFi.BSSIDstr(i);
+
+    // Check for the target SSID and get the network with the strongest signal
+    if (foundSSID == ssid) {
+      if (rssi > strongestSignal) {
+        strongestSignal = rssi;
+        bestSSID = foundSSID;
+        bestBSSID = bssid;
+      }
+    }
+  }
+
+  if (bestSSID != "") {
+    // Check if already connected to the strongest network
+    if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == bestSSID && WiFi.BSSIDstr() == bestBSSID) {
+      Serial.println("Already connected to the strongest network, no need to reconnect.");
+      return;  // No need to reconnect, already connected to the best network
+    }
+
+    // If not connected to the strongest network, disconnect first
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("Disconnecting from current WiFi...");
+      WiFi.disconnect();  // Disconnect from current network
+      delay(1000);        // Short delay to ensure proper disconnection
+    }
+
+    // Now connect to the strongest network
+    Serial.printf("Connecting to strongest network: %s with BSSID: %s\n", bestSSID.c_str(), bestBSSID.c_str());
+    WiFi.begin(bestSSID.c_str(), password);  // Connect to the strongest WiFi network
+
+    int tries = 0;
+    while (WiFi.status() != WL_CONNECTED && tries < 10) {
+      delay(1000);
+      Serial.print(".");
+      tries++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      reconnectMQTT();
+      publishWiFiInfo();
+      publishIPAddress();
+      Serial.println("\nConnected to WiFi!");
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.println("\nFailed to connect to WiFi.");
+    }
+  } else {
+    Serial.println("No matching SSID found.");
+  }
+}
+
+// Function to report the free heap memory over MQTT
+void reportFreeHeap() {
+  uint32_t freeHeap = ESP.getFreeHeap();  // Get free heap memory
+  // Publish the heap memory data to the MQTT topic
+  client.publish(dataChannel2,String("FreeMemory:" +  String(freeHeap)).c_str());
+  //Serial.print("Published free heap: ");
+  //Serial.println(heapStr);  // Print to Serial for debugging
+}
+void publishRSSI() {
+  int rssi = WiFi.RSSI();  
+  client.publish(dataChannel2, String("RSSI:" + String(rssi)).c_str());
+}
+void publishWiFiChannel() {
+  int channel = WiFi.channel();  
+  client.publish(dataChannel2, String("Channel:" + String(channel)).c_str());  
+}
+// Function to publish WiFi info (SSID and BSSID) via MQTT
+void publishWiFiInfo() {
+  if (WiFi.status() == WL_CONNECTED) {
+    String connectedSSID = WiFi.SSID();         // Get SSID
+    String connectedBSSID = WiFi.BSSIDstr();    // Get BSSID
+
+    // Create MQTT message
+    String message = "Connected to SSID: " + connectedSSID + ", BSSID: " + connectedBSSID;
+
+    // Publish message to MQTT
+    client.publish(dataChannel2, message.c_str());
+
+    //Serial.println("Published WiFi info to MQTT:");
+    //Serial.println(message);
+  } else {
+    //Serial.println("Not connected to any WiFi network.");
+  }
+}
+void publishIPAddress() {
+  // Get the local IP address
+  String ipAddress = WiFi.localIP().toString();
+  
+  // Publish the IP address to the specified topic
+  if (client.publish(dataChannel2, ipAddress.c_str())) {
+    //Serial.println("IP Address published: " + ipAddress);
+  } else {
+    Serial.println("Failed to publish IP Address");
+  }
+}
+void resetScreenAndKeypad() {
+  memset(enteredDigits, ' ', sizeof(enteredDigits));
+  digitCount = 0;
+  drawScreen();
+}
