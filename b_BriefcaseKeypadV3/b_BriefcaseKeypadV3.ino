@@ -1,22 +1,13 @@
-#include <Keypad.h>
-#include <U8g2lib.h>
+//U8G2 version 2.34.22
+//ESP32 Dev Module Board version 2.0.0
+//-----------------------------------------------------------WiFi,MQTT,OTA-----------------------------------------------------------
 #include <PubSubClient.h>
 #include <WiFi.h>
-#include <SPI.h>
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
-#include <FastLED.h>
-#define ROWS 4
-#define COLS 4
-// Hall effect sensor pins
-const int hallPins[] = {12, 2, 27, 32, 15, 16 };
-const int numSensors = sizeof(hallPins) / sizeof(hallPins[0]);
-int lastHallStates[numSensors]; // Array to store the last state of each sensor
-
-#define NUM_LEDS 1
-#define DATA_PIN 5
-CRGB leds[NUM_LEDS];
+unsigned long previousMillis = 0;
+const long interval = 10000;           // interval at which to send mqtt watchdog (milliseconds)
 
 const char* ssid = "Control booth";
 const char* password = "MontyLives";
@@ -26,88 +17,66 @@ const char* mqtt_server = "192.168.86.102";
 #define MQTT_PASSWORD ""
 #define MQTT_SERIAL_PUBLISH_CH "/icircuit/ESP32/serialdata/tx"
 #define MQTT_SERIAL_RECEIVER_CH "/icircuit/ESP32/serialdata/rx"
-unsigned long previousMillis = 0;
-const long interval = 10000;           // interval at which to send mqtt watchdog (milliseconds)
 
-bool usingSpiBus = false; //Change to true if using spi bus
 //Base notifications
-const char* hostName = "Esp32_EPObox"; // Set your controller unique name here
-const char* quitMessage = ("______ force quitting...");
-const char* onlineMessage = ("________ Online");
-const char* watchdogMessage = "Esp32_EPO Watchdog";
+const char* hostName = "Episode 1 Briefcase"; // Set your controller unique name here
+const char* quitMessage = "Episode 1 Briefcase quitting...";
+const char* onlineMessage = "Episode 1 Briefcase Online";
+const char* watchdogMessage = "Episode 1 Briefcase Watchdog";
 
 //mqtt Topics
-#define NUM_SUBSCRIPTIONS 1//Must set to match Qty in subscribeChannel below
+#define NUM_SUBSCRIPTIONS 2
 const char* mainPublishChannel = "/Renegade/Room1/"; //typically /Renegade/Room1/ or /Renegade/Engineering/
-const char* dataChannel = "/Renegade/Engineering/Test/";
-const char* dataChannel2 = "/Renegade/Engineering/Test/Health/";
-const char* watchdogChannel = "/Renegade/Engineering/Test/";
+const char* dataChannel = "/Renegade/Room1/Briefcase/";
+const char* watchdogChannel = "/Renegade/Room1/";
 const char* subscribeChannel[NUM_SUBSCRIPTIONS] = {
-  "/Renegade/Room1/EPO/",
+  "/Renegade/Room1/Briefcase/Control/",
+  "/Renegade/Room1/Briefcase/CodeChange/",
   //"myTopic0",
   //"myTopic1",
   //more subscriptions can be added here, separated by commas
 };
-
 WiFiClient wifiClient;
+
 PubSubClient client(wifiClient);
-boolean modeActive = false;
-boolean quit = false;
-//-----------------------------------------------------------End Header-----------------------------------------------------------
+//-----------------------------------------------------------Keypad-----------------------------------------------------------
+// Use this example with the Adafruit Keypad products.
+// You'll need to know the Product ID for your keypad.
+// Here's a summary:
+//   * PID3844 4x4 Matrix Keypad
+//   * PID3845 3x4 Matrix Keypad
+//   * PID1824 3x4 Phone-style Matrix Keypad
+//   * PID1332 Membrane 1x4 Keypad
+//   * PID419  Membrane 3x4 Matrix Keypad
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  payload[length] = '\0';
-  String message = (char*)payload;
-  Serial.println("-------new message from broker-----");
-  Serial.print("channel:");
-  Serial.println(topic);
-  Serial.print("data:");
-  Serial.write(payload, length);
-  Serial.println();
+#include "Adafruit_Keypad.h"
 
-  if (message == "quit" && modeActive) {
-    client.publish(mainPublishChannel, quitMessage);
-    quit = true;
-  }
-   else if (message == "CheckWiFi") {     
-     connectToStrongestWiFi();
-     publishWiFiInfo();
-    } 
-  if (!modeActive) {
+// define your specific keypad here via PID
+#define KEYPAD_PID3845
+// define your pins here
+// can ignore ones that don't apply
+#define C1    19 //purple
+#define C2    33 //blue
+#define C3    32 //green
+#define R1    23 //orange
+#define R2    25 //yellow
+#define R3    26 //white
+#define R4    27 //red
+// leave this import after the above configuration
+#include "keypad_config.h"
 
-    if (message == "disableEPO") {
-      
-      setDisabledMode(true);
-      quit = false;
-      modeActive = false;
+//initialize an instance of class NewKeypad
+Adafruit_Keypad briefcaseKeypad = Adafruit_Keypad( makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-    } else if (message == "enableEPO") {
-      setDisabledMode(false);
-      resetScreenAndKeypad();
-      //add more modes here
-      quit = false;
-      modeActive = false;
-    }
- else if (message == "resetEPO") {
-      setDisabledMode(false);
-      resetScreenAndKeypad();
-    }
-  }
+//-----------------------------------------------------------Display-----------------------------------------------------------
+#include <U8g2lib.h>
 
-}
-byte rowPins[ROWS] = {14, 33, 25, 26};
-byte colPins[COLS] = {18, 19, 17, 13};
-
-char keys[ROWS][COLS] = {
-  {'1', '4', '7', '*'},
-  {'2', '5', '8', '0'},
-  {'3', '6', '9', '#'},
-  {'A', 'B', 'C', 'D'}
-}; 
-
-Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
-
+#ifdef U8X8_HAVE_HW_SPI
+#include <SPI.h>
+#endif
+#ifdef U8X8_HAVE_HW_I2C
+#include <Wire.h>
+#endif
 // 'pixil-frame-0', 128x64px
 const unsigned char ren_logo_pixil_frame_0 [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -215,24 +184,24 @@ const unsigned char ren_logo_pixil_frame_1 [] PROGMEM = {
   0x00, 0x00, 0x00, 0x03, 0x06, 0x18, 0xe0, 0x07, 0x18, 0x00, 0x00, 0x60, 0xc0, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x80, 0x01, 0x03, 0x08, 0x10, 0x04, 0x30, 0x00, 0x00, 0xc0, 0x80, 0x01, 0x00, 0x00,
   0x00, 0x00, 0xc0, 0x80, 0x01, 0x04, 0x08, 0x0c, 0x60, 0x00, 0x00, 0x80, 0x01, 0x03, 0x00, 0x00,
-  0x00, 0x00, 0x60, 0xc0, 0x00, 0x06, 0x04, 0x18, 0xc0, 0x00, 0x00, 0x00, 0x03, 0x06, 0x00, 0x00,
+  0x00, 0x00, 0xe0, 0xc0, 0x00, 0x06, 0x04, 0x18, 0xc0, 0x00, 0x00, 0x00, 0x03, 0x06, 0x00, 0x00,
   0x00, 0x00, 0x60, 0xc0, 0x00, 0x03, 0x02, 0x30, 0x80, 0x01, 0x00, 0x00, 0x03, 0x06, 0x00, 0x00,
-  0x00, 0x00, 0x30, 0x60, 0x80, 0x01, 0x02, 0x60, 0x00, 0x03, 0x00, 0x00, 0x06, 0x0c, 0x00, 0x00,
-  0x00, 0x00, 0x18, 0x30, 0x80, 0x00, 0x01, 0xc0, 0x00, 0x06, 0x00, 0x00, 0x0c, 0x18, 0x00, 0x00,
-  0x00, 0x00, 0x0c, 0x18, 0xc0, 0x80, 0x00, 0x80, 0x01, 0x0c, 0x00, 0x00, 0x18, 0x30, 0x00, 0x00,
-  0x00, 0x00, 0x06, 0x0c, 0x60, 0x40, 0x00, 0x00, 0x03, 0x18, 0x00, 0x00, 0x30, 0x60, 0x00, 0x00,
-  0x00, 0x00, 0x06, 0x0c, 0xe0, 0x3f, 0x00, 0x00, 0x06, 0x30, 0x00, 0x00, 0x30, 0x60, 0x00, 0x00,
-  0x00, 0x00, 0x03, 0x06, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x60, 0x00, 0x00, 0x60, 0xc0, 0x00, 0x00,
-  0x00, 0x80, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x18, 0xc0, 0x00, 0x00, 0xc0, 0x80, 0x01, 0x00,
-  0x00, 0xc0, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00, 0x30, 0x80, 0x01, 0x00, 0x80, 0x01, 0x03, 0x00,
-  0x00, 0x60, 0xc0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00, 0x03, 0x00, 0x80, 0x03, 0x06, 0x00,
-  0x00, 0x60, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x06, 0x00, 0x00, 0x03, 0x06, 0x00,
-  0x00, 0x30, 0xe0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x80, 0x01, 0xfc, 0xff, 0xff, 0x07, 0x0c, 0x00,
-  0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00,
-  0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x06, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00,
-  0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00,
-  0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x18, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00,
-  0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00,
+  0x00, 0x00, 0x70, 0x60, 0x80, 0x01, 0x02, 0x60, 0x00, 0x03, 0x00, 0x00, 0x06, 0x0c, 0x00, 0x00,
+  0x00, 0x00, 0x78, 0x30, 0x80, 0x00, 0x01, 0xc0, 0x00, 0x06, 0x00, 0x00, 0x0c, 0x18, 0x00, 0x00,
+  0x00, 0x00, 0x7c, 0x18, 0xc0, 0x80, 0x00, 0x80, 0x01, 0x0c, 0x00, 0x00, 0x18, 0x30, 0x00, 0x00,
+  0x00, 0x00, 0x3e, 0x0c, 0x60, 0x40, 0x00, 0x00, 0x03, 0x18, 0x00, 0x00, 0x30, 0x60, 0x00, 0x00,
+  0x00, 0x00, 0x3e, 0x0c, 0xe0, 0x3f, 0x00, 0x00, 0x06, 0x30, 0x00, 0x00, 0x30, 0x60, 0x00, 0x00,
+  0x00, 0x00, 0x3f, 0x06, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x60, 0x00, 0x00, 0x60, 0xc0, 0x00, 0x00,
+  0x00, 0x80, 0x3f, 0x03, 0x00, 0x00, 0x00, 0x00, 0x18, 0xc0, 0x00, 0x00, 0xc0, 0x80, 0x01, 0x00,
+  0x00, 0xc0, 0x9f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x30, 0x80, 0x01, 0x00, 0x80, 0x01, 0x03, 0x00,
+  0x00, 0xe0, 0xdf, 0x01, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00, 0x03, 0x00, 0x80, 0x03, 0x06, 0x00,
+  0x00, 0xe0, 0xdf, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x06, 0x00, 0x00, 0x03, 0x06, 0x00,
+  0x00, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x80, 0x01, 0xfc, 0xff, 0xff, 0x07, 0x0c, 0x00,
+  0x00, 0xf8, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00,
+  0x00, 0xfc, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x06, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00,
+  0x00, 0xfe, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00,
+  0x00, 0xfe, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x18, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00,
+  0x00, 0xff, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00,
   0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0xe0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -522,125 +491,37 @@ const unsigned char* ren_logo_allArray[6] = {
   ren_logo_pixil_frame_5
 };
 
-char enteredDigits[4] = {' ', ' ', ' ', ' '};
-int digitCount = 0;
-bool disabledMode = false; // Controlled via MQTT now
 
-const char correctCode[] = "CD98"; // Change as needed
 
-void drawPentagon(int x, int y) {
-  int size = 10;
-  u8g2.drawLine(x, y - size, x - size, y - size / 3);
-  u8g2.drawLine(x - size, y - size / 3, x - size / 2, y + size);
-  u8g2.drawLine(x - size / 2, y + size, x + size / 2, y + size);
-  u8g2.drawLine(x + size / 2, y + size, x + size, y - size / 3);
-  u8g2.drawLine(x + size, y - size / 3, x, y - size);
-}
 
-void drawScreen() {
-  if (disabledMode) {
-    u8g2.clearBuffer();
-    u8g2.sendBuffer();
-    return;
-  }
 
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_ncenB18_tf);
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* clock=*/ 22, /* data=*/ 21, /* reset=*/ U8X8_PIN_NONE);   // All Boards without Reset of the Display
+byte cursorPosition = 0;
+const byte relayPin = 4;
+String input;
+String secretInput;
+String finalInput;
+String briefcasePassword = "8631";//set default keypad unlock code here
+boolean unlocked = false;
+boolean forceUnlocked = false;
 
-  int xPos[4] = {24, 52, 80, 108};
-  int yPos = 40;
+const byte latchSwitch = 16;  //orange
+String IP = WiFi.localIP().toString();
 
-  for (int i = 0; i < 4; i++) {
-    if (enteredDigits[i] == ' ') {
-      switch (i) {
-        case 0: drawPentagon(xPos[i], yPos); break;
-        case 1: u8g2.drawFrame(xPos[i] - 10, yPos - 10, 20, 20); break;
-        case 2: u8g2.drawCircle(xPos[i], yPos, 10); break;
-        case 3: u8g2.drawLine(xPos[i], yPos - 10, xPos[i] - 10, yPos + 10);
-  u8g2.drawLine(xPos[i] - 10, yPos + 10, xPos[i] + 10, yPos + 10);
-  u8g2.drawLine(xPos[i] + 10, yPos + 10, xPos[i], yPos - 10);
-  break;
-      }
-    } else {
-      u8g2.setCursor(xPos[i] - 5, yPos + 6);
-      u8g2.print(enteredDigits[i]);
-    }
-  }
 
-  u8g2.sendBuffer();
-}
-
-void flashMessage(const char* line1, const char* line2, int flashes, bool hold) {
-  int screenWidth = u8g2.getDisplayWidth(); // Get screen width
-
-  for (int i = 0; i < flashes; i++) {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_ncenB10_tf); // Set font *before* measuring width
-
-    // Calculate centered x position for line 1
-    int x1 = (screenWidth - u8g2.getStrWidth(line1)) / 2;
-    u8g2.setCursor(x1, 25); // Use calculated x, keep y
-    u8g2.print(line1);
-
-    // Calculate centered x position for line 2
-    int x2 = (screenWidth - u8g2.getStrWidth(line2)) / 2;
-    u8g2.setCursor(x2, 45); // Use calculated x, keep y
-    u8g2.print(line2);
-
-    u8g2.sendBuffer();
-    delay(500);
-
-    u8g2.clearBuffer();
-    u8g2.sendBuffer();
-    delay(500);
-  }
-
-  if (hold) {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_ncenB10_tf); // Set font *before* measuring width
-
-    // Calculate centered x position for line 1
-    int x1 = (screenWidth - u8g2.getStrWidth(line1)) / 2;
-    u8g2.setCursor(x1, 25); // Use calculated x, keep y
-    u8g2.print(line1);
-
-    // Calculate centered x position for line 2
-    int x2 = (screenWidth - u8g2.getStrWidth(line2)) / 2;
-    u8g2.setCursor(x2, 45); // Use calculated x, keep y
-    u8g2.print(line2);
-
-    u8g2.sendBuffer();
-  }
-}
-
-void setDisabledMode(bool state) {
-  disabledMode = state;
-  drawScreen();
-}
-
-void setup() {
-   // FastLED setup
-  FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
-  FastLED.setBrightness(255);
-  fill_solid(leds, NUM_LEDS, CRGB::Red);
-    FastLED.show();
-  Serial.begin(115200);
-  //------------------------------------------------------Wifi------------------------------------------------------
-  Serial.setTimeout(500);  // Set time out for 
-  client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(callback);
+//-----------------------------------------------------------End Header-----------------------------------------------------------
+void setup_wifi() {
+  delay(10);
+  Serial.println("Booting");
   WiFi.mode(WIFI_STA);
-  delay(10); 
-  connectToStrongestWiFi();
-  //-----Start MQTT----------------
-  //reconnectMQTT(); This is handled inside connectToStrongestWiFi()
-  //---------------OTA Setup------------------------
+  WiFi.begin(ssid, password);
+  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    Serial.println("Connection Failed! Rebooting...");
+    delay(5000);
+    ESP.restart();
+  }
   // Port defaults to 3232
   // ArduinoOTA.setPort(3232);
-for (int i = 0; i < numSensors; i++) {
-        pinMode(hallPins[i], INPUT_PULLUP);
-        lastHallStates[i] = digitalRead(hallPins[i]); // Initialize last states
-    }
 
   // Hostname defaults to esp3232-[MAC]
   ArduinoOTA.setHostname(hostName);
@@ -662,12 +543,25 @@ for (int i = 0; i < numSensors; i++) {
 
     // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
     Serial.println("Start updating " + type);
+    u8g2.clearBuffer();
+    u8g2.setDrawColor(1);
+    u8g2.setFont(u8g2_font_spleen5x8_mf);
+    u8g2.drawStr(0, 16, String("Updating " + type).c_str());
+    u8g2.sendBuffer();
+
   })
   .onEnd([]() {
     Serial.println("\nEnd");
+    u8g2.setDrawColor(1);
+    u8g2.setFont(u8g2_font_spleen5x8_mf);
+    u8g2.drawStr(0, 26, "Done");
+    u8g2.sendBuffer();
   })
   .onProgress([](unsigned int progress, unsigned int total) {
     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    //    u8g2.drawFrame(5, 26, total/100, 12);
+    //    u8g2.drawBox(5, 26, (progress / (total / 100)), 12);
+    //    u8g2.sendBuffer();
   })
   .onError([](ota_error_t error) {
     Serial.printf("Error[%u]: ", error);
@@ -678,98 +572,15 @@ for (int i = 0; i < numSensors; i++) {
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
   });
 
-
   ArduinoOTA.begin();
 
-      Serial.println("\nConnected!");
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
-  u8g2.begin();
-  drawScreen();
-  // Initialize MQTT here and set up callback to call setDisabledMode
+  Serial.println("Ready");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  IP = WiFi.localIP().toString();
 }
 
-void loop() {
-   fill_solid(leds, NUM_LEDS, CRGB::Green);
-  char key = keypad.getKey();
-handleAll();
-for (int i = 0; i < numSensors; i++) {
-    int currentSensorValue = digitalRead(hallPins[i]);
-    
-    // Check if the state has changed
-    if (currentSensorValue != lastHallStates[i]) {
-        char topic[100];
-        snprintf(topic, sizeof(topic), "%s%s/hall_sensor/%d", subscribeChannel[0], hostName, hallPins[i]); // Use mainPublishChannel and hostname for uniqueness
-
-        const char* message = (currentSensorValue == LOW) ? "triggered" : "released"; // LOW means triggered due to INPUT_PULLUP
-
-        Serial.printf("Sensor on pin %d state changed to: %s\n", hallPins[i], message);
-        Serial.print("Publishing to topic: ");
-        Serial.println(topic);
-        Serial.print("Publishing message: ");
-        Serial.println(message);
-
-        // Publish the state change to the MQTT topic
-        if (client.publish(topic, message)) {
-            Serial.println("Published successfully");
-        } else {
-            Serial.println("Failed to publish");
-        }
-        
-        lastHallStates[i] = currentSensorValue; // Update the last state
-        // Removed delay(500) - only publish on change now
-    }
-}
-//  wait(1000); // Consider if this wait is necessary for your application logic
-  // Serial.println("Loop"); // Can be noisy, uncomment if needed for debugging
-  if (key) {
-    if (disabledMode || digitCount >= 4) return;
-
-    enteredDigits[digitCount] = key;
-    digitCount++;
-    drawScreen();
-
-    if (digitCount == 4) {
-      delay(500);
-      if (strncmp(enteredDigits, correctCode, 4) == 0) {
-        flashMessage("E.P.O.", "AUTHORIZED", 3, true);
-        client.publish("/Renegade/Room1/EPO/","EPO puzzle solved");
-        // Play animation after correct code
-        unsigned long animationStartTime = millis();
-        while (millis() - animationStartTime < 5000) { // Play for 5 seconds
-            for (int i = 0; i < ren_logo_allArray_LEN; i++) {
-                u8g2.clearBuffer(); // Clear buffer before drawing next frame
-                u8g2.drawXBM(0, 0, 128, 64, ren_logo_allArray[i]);
-                u8g2.sendBuffer();
-                wait(5); // Short delay between frames
-                if (millis() - animationStartTime >= 5000) break; // Exit if 5 seconds passed
-            }
-             // Add a small delay at the end of the cycle if needed, or rely on wait(5)
-             // wait(100); // Optional longer delay between cycles
-        }
-        // After animation, reset to the initial screen or desired state
-        resetScreenAndKeypad();
-
-      } else {
-        flashMessage("ACCESS", "DENIED", 3, false);
-        delay(500);
-        memset(enteredDigits, ' ', sizeof(enteredDigits));
-        digitCount = 0;
-        drawScreen();
-    
-      }
-    }
-  }
-}
-void handleAll() {
-  checkConnection();
-  ArduinoOTA.handle();
-  client.loop();
-}
-
-void reconnectMQTT() {
-  if (usingSpiBus){SPI.end();
-  }
+void reconnect() {
   // Loop until we're reconnected
   while (!client.connected() && (WiFi.status() == WL_CONNECTED)) {
     Serial.print("Attempting MQTT connection...");
@@ -780,7 +591,7 @@ void reconnectMQTT() {
     if (client.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("connected");
       //Once connected, publish an announcement...
-      client.publish(mainPublishChannel, onlineMessage);
+      client.publish(mainPublishChannel, onlineMessage);//change this to required message
       // ... and resubscribe
       for (int i = 0; i < NUM_SUBSCRIPTIONS; i++) {
         client.subscribe(subscribeChannel[i]);
@@ -793,10 +604,47 @@ void reconnectMQTT() {
       wait(5000);
     }
   }
-  if (usingSpiBus){
-    SPI.begin();// Init SPI bus
+
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  payload[length] = '\0';
+  String message = (char*)payload;
+  Serial.println("-------new message from broker-----");
+  Serial.print("channel:");
+  Serial.println(topic);
+  Serial.print("data:");
+  Serial.write(payload, length);
+  Serial.println();
+  if (message == "unlock") {
+    unlocked = true;
+  } else if (message == "lock") {
+    unlocked = false;
+  } else if (message == "force unlock") {
+    digitalWrite(relayPin, HIGH);
+    wait(150);
+    digitalWrite(relayPin, LOW);
+    cursorPosition = 4;
+    unlocked = true;
+    forceUnlocked = true;
+  } else if (message == "ESP RESTART") {
+    ESP.restart();
+  } else if (!strcmp(topic, subscribeChannel[1])) {
+    briefcasePassword = message;
+    client.publish(dataChannel, String("Passkey changed to " + String(briefcasePassword)).c_str());
+//    Display new passkey    
+//    u8g2.clearBuffer();
+//    u8g2.setDrawColor(1);
+//    u8g2.setFont(u8g2_font_spleen5x8_mf);
+//    u8g2.drawStr(0, 16, "Passkey changed to");
+//    u8g2.setFont(u8g2_font_spleen6x12_mf);
+//    u8g2.drawStr(0, 28, message.c_str());
+//    u8g2.sendBuffer();
+//    wait(5000);
+//    u8g2.clearBuffer();
+//    u8g2.drawFrame(0, 0, 128, 63);
+//    u8g2.sendBuffer();
   }
-    
 }
 
 void checkConnection() {
@@ -804,25 +652,271 @@ void checkConnection() {
   // if WiFi is down, try reconnecting
   if ((WiFi.status() != WL_CONNECTED) && (currentMillis - previousMillis >= interval)) {
     Serial.print(millis());
-    Serial.println("Reconnecting to WiFi...");    
-    connectToStrongestWiFi();   
+    Serial.println("Reconnecting to WiFi...");
+    WiFi.disconnect();
+    delay(100);
+    WiFi.begin(ssid, password);
+    //WiFi.reconnect();
     previousMillis = currentMillis;
   }
   if ((!client.connected() ) && (WiFi.status() == WL_CONNECTED) ) {
     Serial.println("Lost mqtt connection");
-    reconnectMQTT();
+    reconnect();
   }
   if ((currentMillis - previousMillis >= interval)) {
-    client.publish(watchdogChannel, watchdogMessage);
-    reportFreeHeap();
-    publishRSSI();
-    publishWiFiChannel();
+    client.publish(watchdogChannel, watchdogMessage);//Change this to correct watchdog info
     previousMillis = currentMillis;
 
   }
 
 }
 
+//-----------------------------------------------------------Begin Base Code-----------------------------------------------------------
+void setup() {
+  
+  
+  Serial.begin(115200);
+  pinMode(relayPin, OUTPUT);
+  pinMode(latchSwitch, INPUT_PULLUP);
+  Serial.setTimeout(500);  // Set time out for
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+  reconnect();
+  briefcaseKeypad.begin();
+
+
+  //  u8g2.setFont(u8g2_font_spleen32x64_mf); // choose a suitable font
+  //  u8g2.drawFrame(0, 0, 128, 63);
+  //  u8g2.sendBuffer();
+  //Display Setup
+  u8g2.begin();
+  u8g2.clearBuffer();
+
+  u8g2.setDrawColor(1);
+  u8g2.setFont(u8g2_font_spleen5x8_mf); // choose a suitable font
+  //u8g2.drawXBM(0, 0, 128, 64, ren_logo_pixil_frame_0);
+  u8g2.drawStr(16, 16, "C 2099 RennSoft");
+  u8g2.drawStr(16, 24, "All Rights Reserved");
+  u8g2.sendBuffer();
+  //wait(750);
+  //boot animation
+  bootAnimation();
+}
+
+
+
+void loop() {
+  handleAll();
+  byte loopCounter = 0; //increments each loop
+  byte slowerLoopCounter = 0; //increments every 10 loops (to adjust blink speed)
+  uint32_t longPressTimer = 0;
+
+  //-----------------------------------------------------------Get 4 digit code-----------------------------------------------------------
+  while (cursorPosition < 4) {
+    briefcaseKeypad.tick();
+    handleAll();
+    u8g2.setDrawColor(slowerLoopCounter % 2);
+    u8g2.drawBox(4 + (cursorPosition * 32), 4, 3, 54);
+    u8g2.sendBuffer();
+    while (briefcaseKeypad.available()) {
+      keypadEvent e = briefcaseKeypad.read();
+      //Serial.print((char)e.bit.KEY);
+      if (e.bit.EVENT == KEY_JUST_PRESSED) {
+        //Serial.println(" pressed");
+        input = String((char)e.bit.KEY);
+        if (input == "#" || input == "*") {
+          longPressTimer = millis();
+        } else {
+          finalInput = finalInput + input;
+          client.publish(dataChannel, input.c_str());
+          u8g2.setDrawColor(1);
+          u8g2.setFont(u8g2_font_spleen32x64_mf); // choose a suitable font
+          u8g2.drawStr(cursorPosition * 32, 51, input.c_str()); // write something to the internal memory
+          u8g2.drawFrame(0, 0, 128, 63);
+          u8g2.sendBuffer();          // transfer internal memory to the display
+          cursorPosition = cursorPosition + 1;
+          slowerLoopCounter = 1; //reset the text cursor
+        }
+      }
+      else if (e.bit.EVENT == KEY_JUST_RELEASED && input == "*") {
+        //Serial.println(" released");
+        longPressTimer = millis() - longPressTimer;
+        if (longPressTimer > 3000) {
+          cursorPosition = 0;
+          input = "";
+          finalInput = "";
+          drawBorder();
+          maintainenceScreen();
+        }
+        longPressTimer = 0;
+      }
+    }
+    loopCounter++;
+    if (loopCounter % 5 == 0) {
+      slowerLoopCounter++;
+    }
+  }
+
+  //Send finalInput
+  //Serial.println(finalInput);
+  client.publish(dataChannel, finalInput.c_str());
+
+  //Play finishing animation
+  u8g2.setDrawColor(0);
+  u8g2.drawBox(10, 26, 108, 12);
+  u8g2.setDrawColor(1);
+  u8g2.drawFrame(10, 26, 108, 12);
+  u8g2.sendBuffer();
+
+  for (int i = 1; i < 85; i = i + 6) {
+    u8g2.drawBox(10, 26, i, 12);
+    u8g2.sendBuffer();
+  }
+
+  wait(500);
+  u8g2.drawBox(10, 26, 100, 12);
+  u8g2.sendBuffer();
+  wait(350);
+  u8g2.drawBox(10, 26, 109, 12);
+  u8g2.sendBuffer();
+  wait(1000);
+
+
+  //-----------------------------------------------------------Evaluate 4 Digit Code-----------------------------------------------------------
+  if (finalInput == briefcasePassword) {
+    //Serial.println("Authentication Successful");
+    //unlocked = true;
+    client.publish(dataChannel, "Waiting for unlock signal");
+    u8g2.clearBuffer();
+    for (int i = 0; i < 13; i++) {
+      u8g2.setDrawColor(i % 2 + 1);
+      u8g2.drawBox(0, 23, 128, 18);
+      u8g2.setDrawColor(i % 2);
+      u8g2.setFont(u8g2_font_spleen5x8_mf);
+      u8g2.drawStr(3, 32, "Authentication Successful");
+      u8g2.sendBuffer();
+      wait(100);
+    }
+    wait(200);
+    for (int i = 0; i < 6; i++) {
+      u8g2.clearBuffer();
+      u8g2.setDrawColor(1);
+      u8g2.drawBox(0, 23 - i * 4, 128, 18);
+      u8g2.setDrawColor(0);
+      u8g2.setFont(u8g2_font_spleen5x8_mf);
+      u8g2.drawStr(3, 32 - i * 4, "Authentication Successful");
+      u8g2.sendBuffer();
+    }
+    wait(200);
+    u8g2.setDrawColor(1);
+    while (unlocked == false) {
+      handleAll();
+      u8g2.drawStr(40, 32, "Unlocking -");
+      u8g2.sendBuffer();
+      u8g2.drawStr(40, 32, "Unlocking /");
+      u8g2.sendBuffer();
+      u8g2.drawStr(40, 32, "Unlocking |");
+      u8g2.sendBuffer();
+      u8g2.drawStr(40, 32, "Unlocking \\");
+      u8g2.sendBuffer();
+    }
+
+    //Unlock latch
+    client.publish(dataChannel, "Briefcase Unlocked");
+    digitalWrite(relayPin, HIGH);
+    wait(150);
+    digitalWrite(relayPin, LOW);
+    u8g2.drawStr(6, 32, "Secure package unlocked.");
+    u8g2.sendBuffer();
+    wait(2000);
+
+  } else {
+    //Serial.println("Authentication Failed");
+    u8g2.clearBuffer();
+    for (int i = 0; i < 14; i++) {
+      u8g2.setDrawColor(i % 2 + 1);
+      u8g2.drawBox(0, 23, 128, 18);
+      u8g2.setDrawColor(i % 2);
+      u8g2.setFont(u8g2_font_spleen5x8_mf);
+      if (forceUnlocked) {
+        u8g2.drawStr(8, 32, "Authentication Override");
+      } else {
+        u8g2.drawStr(8, 32, "Authentication Failed");
+      }
+      u8g2.sendBuffer();
+      wait(100);
+    }
+    wait(1500);
+    u8g2.setDrawColor(1);
+  }
+
+  //-----------------------------------------------------------Reset for next loop-----------------------------------------------------------
+  cursorPosition = 0;
+  finalInput = "";
+  forceUnlocked = false;
+
+  //  if (unlocked) {
+  //    u8g2.clearBuffer();
+  //    u8g2.drawXBM(0, 0, 128, 64, ren_logo_pixil_frame_0);
+  //    u8g2.sendBuffer();
+  //  }
+
+  //Play animation while unlocked
+  while (unlocked) {
+    handleAll();
+    for (int i = 0; i < 7; i++) {
+      if (i < 6) {
+        u8g2.drawXBM(0, 0, 128, 64, ren_logo_allArray[i]);
+        u8g2.sendBuffer();
+      } else {
+        u8g2.drawXBM(0, 0, 128, 64, ren_logo_allArray[0]);
+        u8g2.sendBuffer();
+      }
+      wait(5);
+    }
+    wait(10000);
+  }
+  drawBorder();
+
+}//void loop
+
+void bootAnimation() {
+
+  for (int i = 0; i < 15; i++) { //loading wheel
+    u8g2.drawHLine(0, 0, map(i, 0, 10, 0, 128));
+    u8g2.drawStr(8, 16, "-");
+    u8g2.sendBuffer();
+    u8g2.drawStr(8, 16, "/");
+    u8g2.sendBuffer();
+    u8g2.drawStr(8, 16, "|");
+    u8g2.sendBuffer();
+    u8g2.drawStr(8, 16, "\\");
+    u8g2.sendBuffer();
+  }
+  wait(100);
+  u8g2.drawXBM(0, 0, 128, 64, ren_logo_pixil_frame_0);
+  u8g2.sendBuffer();
+  wait(500);
+  for (int i = 0; i < 7; i++) {
+    if (i < 6) {
+      u8g2.drawXBM(0, 0, 128, 64, ren_logo_allArray[i]);
+      u8g2.sendBuffer();
+    } else {
+      u8g2.drawXBM(0, 0, 128, 64, ren_logo_allArray[0]);
+      u8g2.sendBuffer();
+    }
+    wait(5);
+  }
+  wait(1000);
+  drawBorder();
+}
+
+void handleAll() {
+  ArduinoOTA.handle();
+  checkConnection();
+  client.loop();
+}
 
 void wait(uint16_t msWait) {
   uint32_t start = millis();
@@ -832,120 +926,63 @@ void wait(uint16_t msWait) {
   }
 }
 
-void connectToStrongestWiFi() {
-  int n = WiFi.scanNetworks();  // Scan available networks
+void maintainenceScreen() {
+  String temporaryInput = "HelloWorld";
+  byte page = 0;
+  byte counter = 0;
+  while (temporaryInput != "*") {
+    page = counter % 4;
+    switch (page) {
+      case 0: //Battery Status
+        u8g2.clearBuffer();
+        u8g2.setDrawColor(1);
+        u8g2.setFont(u8g2_font_spleen5x8_mf);
+        u8g2.drawStr(0, 16, "Battery percentage:");
+        u8g2.drawStr(0, 26, "No battery connected");
+        u8g2.setFont(u8g2_font_spleen5x8_mf);
+        u8g2.drawStr(0, 52, "Press * to return");
+        u8g2.sendBuffer();
+        break;
+      case 1: //IP Address
+        IP = WiFi.localIP().toString();
+        u8g2.clearBuffer();
+        u8g2.setDrawColor(1);
+        u8g2.setFont(u8g2_font_spleen5x8_mf);
+        u8g2.drawStr(0, 16, "IP Address:");
+        u8g2.setFont(u8g2_font_spleen8x16_mf);
+        u8g2.drawStr(0, 40, IP.c_str());
+        u8g2.setFont(u8g2_font_spleen5x8_mf);
+        u8g2.drawStr(0, 52, "Press * to return");
+        u8g2.sendBuffer();
+        break;
+      case 2: //Device Name
+        u8g2.clearBuffer();
+        u8g2.setDrawColor(1);
+        u8g2.setFont(u8g2_font_spleen5x8_mf);
+        u8g2.drawStr(0, 16, "Device name:");
+        u8g2.drawStr(0, 28, hostName);
+        u8g2.drawStr(0, 52, "Press * to return");
+        u8g2.sendBuffer();
+        break;
+    }
 
-  if (n == 0) {
-    Serial.println("No networks found");
-    return;
-  }
-
-  int strongestSignal = -1000;  // Initialize to a very low signal strength
-  String bestSSID = "";
-  String bestBSSID = "";
-
-  for (int i = 0; i < n; i++) {
-    String foundSSID = WiFi.SSID(i);
-    int rssi = WiFi.RSSI(i);
-    String bssid = WiFi.BSSIDstr(i);
-
-    // Check for the target SSID and get the network with the strongest signal
-    if (foundSSID == ssid) {
-      if (rssi > strongestSignal) {
-        strongestSignal = rssi;
-        bestSSID = foundSSID;
-        bestBSSID = bssid;
+    briefcaseKeypad.tick();
+    handleAll();
+    while (briefcaseKeypad.available()) {
+      keypadEvent e = briefcaseKeypad.read();
+      if (e.bit.EVENT == KEY_JUST_PRESSED) {
+        temporaryInput = String((char)e.bit.KEY);
+        if (temporaryInput == "#") {
+          counter++;
+        }
       }
     }
   }
-
-  if (bestSSID != "") {
-    // Check if already connected to the strongest network
-    if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == bestSSID && WiFi.BSSIDstr() == bestBSSID) {
-      Serial.println("Already connected to the strongest network, no need to reconnect.");
-      return;  // No need to reconnect, already connected to the best network
-    }
-
-    // If not connected to the strongest network, disconnect first
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("Disconnecting from current WiFi...");
-      WiFi.disconnect();  // Disconnect from current network
-      delay(1000);        // Short delay to ensure proper disconnection
-    }
-
-    // Now connect to the strongest network
-    Serial.printf("Connecting to strongest network: %s with BSSID: %s\n", bestSSID.c_str(), bestBSSID.c_str());
-    WiFi.begin(bestSSID.c_str(), password);  // Connect to the strongest WiFi network
-
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 10) {
-      delay(1000);
-      Serial.print(".");
-      tries++;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      reconnectMQTT();
-      publishWiFiInfo();
-      publishIPAddress();
-      Serial.println("\nConnected to WiFi!");
-      Serial.print("IP address: ");
-      Serial.println(WiFi.localIP());
-    } else {
-      Serial.println("\nFailed to connect to WiFi.");
-    }
-  } else {
-    Serial.println("No matching SSID found.");
-  }
+  drawBorder();
 }
 
-// Function to report the free heap memory over MQTT
-void reportFreeHeap() {
-  uint32_t freeHeap = ESP.getFreeHeap();  // Get free heap memory
-  // Publish the heap memory data to the MQTT topic
-  client.publish(dataChannel2,String("FreeMemory:" +  String(freeHeap)).c_str());
-  //Serial.print("Published free heap: ");
-  //Serial.println(heapStr);  // Print to Serial for debugging
-}
-void publishRSSI() {
-  int rssi = WiFi.RSSI();  
-  client.publish(dataChannel2, String("RSSI:" + String(rssi)).c_str());
-}
-void publishWiFiChannel() {
-  int channel = WiFi.channel();  
-  client.publish(dataChannel2, String("Channel:" + String(channel)).c_str());  
-}
-// Function to publish WiFi info (SSID and BSSID) via MQTT
-void publishWiFiInfo() {
-  if (WiFi.status() == WL_CONNECTED) {
-    String connectedSSID = WiFi.SSID();         // Get SSID
-    String connectedBSSID = WiFi.BSSIDstr();    // Get BSSID
-
-    // Create MQTT message
-    String message = "Connected to SSID: " + connectedSSID + ", BSSID: " + connectedBSSID;
-
-    // Publish message to MQTT
-    client.publish(dataChannel2, message.c_str());
-
-    //Serial.println("Published WiFi info to MQTT:");
-    //Serial.println(message);
-  } else {
-    //Serial.println("Not connected to any WiFi network.");
-  }
-}
-void publishIPAddress() {
-  // Get the local IP address
-  String ipAddress = WiFi.localIP().toString();
-  
-  // Publish the IP address to the specified topic
-  if (client.publish(dataChannel2, ipAddress.c_str())) {
-    //Serial.println("IP Address published: " + ipAddress);
-  } else {
-    Serial.println("Failed to publish IP Address");
-  }
-}
-void resetScreenAndKeypad() {
-  memset(enteredDigits, ' ', sizeof(enteredDigits));
-  digitCount = 0;
-  drawScreen();
+void drawBorder() {
+  u8g2.clearBuffer();
+  u8g2.drawFrame(0, 0, 128, 63);
+  u8g2.sendBuffer();
 }
