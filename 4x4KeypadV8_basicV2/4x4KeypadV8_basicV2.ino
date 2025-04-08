@@ -317,13 +317,12 @@ void loop() {
 
 }
 
-
 //-----------------------------------------------------------Functions-----------------------------------------------------------
 void handleAll() {
-  ArduinoOTA.handle();
-  checkConnection();
-  client.loop();
-  yield();
+  ArduinoOTA.handle();      // Handle over-the-air updates
+  checkConnection();        // Monitor and maintain network connections
+  client.loop();            // Process MQTT client events
+  yield();                  // Allow the ESP8266 to handle background tasks
 }
 
 void wait(uint16_t msWait) {

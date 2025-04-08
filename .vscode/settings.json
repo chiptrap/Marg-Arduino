@@ -1,5 +1,6 @@
 {
     "files.associations": {
-        "bricen_commsstationrfid_v4_9": "cpp"
+        "bricen_commsstationrfid_v4_9": "cpp",
+        "b_commsstationrfid_v4_9": "cpp"
     }
 }

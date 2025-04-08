@@ -2,8 +2,7 @@
 #include <FastLED.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
-#include <SPI.h>
-#include <MFRC522.h>
+//#include <SPI.h>
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
@@ -18,22 +17,24 @@ const char* mqtt_server = "192.168.86.102";
 #define MQTT_SERIAL_PUBLISH_CH "/icircuit/ESP32/serialdata/tx"
 #define MQTT_SERIAL_RECEIVER_CH "/icircuit/ESP32/serialdata/rx"
 unsigned long previousMillis = 0;
-const long interval = 20000;           // interval at which to send mqtt watchdog (milliseconds)
+const long interval = 10000;           // interval at which to send mqtt watchdog (milliseconds)
 
-
+bool usingSpiBus = false; //Change to true if using spi bus
 //Base notifications
-const char* hostName = "Station 2 Encoders and RFID"; // Set your controller unique name here
-const char* quitMessage = "Station 2 Encoders and RFID force quitting...";
-const char* onlineMessage = "Station 2 Encoders and RFID Online";
-const char* watchdogMessage = "Station 2 Encoders and RFID Watchdog";
+const char* hostName = "Station 1 Encoders"; // Set your controller unique name here
+const char* quitMessage = "Station 1 Encoders quitting current mode...";
+const char* onlineMessage = "Station 1 Encoders Online";
+const char* bootMessage = "Station 1 Encoders Power Cycled";
+const char* watchdogMessage = "Station 1 Encoders Watchdog";
 
 //mqtt Topics
 #define NUM_SUBSCRIPTIONS 1
 const char* mainPublishChannel = "/Renegade/Room1/"; //typically /Renegade/Room1/ or /Renegade/Engineering/
-const char* dataChannel = "/Renegade/Room1/Station2EncodersRFID/";
+const char* dataChannel = "/Renegade/Room1/Station1Encoders/";
+const char* dataChannel2 = "/Renegade/Room1/Station1Encoders/Health/";
 const char* watchdogChannel = "/Renegade/Room1/";
 const char* subscribeChannel[NUM_SUBSCRIPTIONS] = {
-  "/Renegade/Room1/Station2EncodersRFID/Control/",
+  "/Renegade/Room1/Station1Encoders/Control/",
   //"myTopic0",
   //"myTopic1",
   //more subscriptions can be added here, separated by commas
@@ -41,43 +42,32 @@ const char* subscribeChannel[NUM_SUBSCRIPTIONS] = {
 
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
+bool espJustReset = true;
 //-----------------------------------------------Mode Logic-----------------------------------------------
 boolean modeActive = false;
 boolean quit = false;
-//-----------------------------------------------RFID-----------------------------------------------
-#define SS_0_PIN  27
-#define SS_1_PIN  13
-#define SS_2_PIN  4
-#define rstPin    32
-#define NR_OF_READERS 3
-
-byte ssPins[] = {SS_0_PIN, SS_1_PIN, SS_2_PIN};
-
-MFRC522 mfrc522[NR_OF_READERS];  // Create MFRC522 instance.
-MFRC522::MIFARE_Key key;
-
-byte currentRFIDinput[NR_OF_READERS] = {0, 0, 0};
-byte lastRFIDinput[NR_OF_READERS] = {0, 0, 0};
-byte correctInput[NR_OF_READERS] = {12, 0, 12};
-
 //-----------------------------------------------FastLED-----------------------------------------------
 // FastLED parameters
-#define DATA_PIN 21
-#define NUM_LEDS 35
-#define MAX_POWER_MILLIAMPS 500
+#define DATA_PIN 17
+#define NUM_LEDS 140
+#define MAX_POWER_MILLIAMPS 1000
 #define LED_TYPE WS2812B
 #define COLOR_ORDER GRB
 #define BRIGHTNESS 255
 CRGB leds[NUM_LEDS];
 
+#define DATA_PIN_AMB 18
+#define NUM_LEDS_AMB 100
+CRGB ledsAmbient[NUM_LEDS_AMB];
 //-----------------------------------------------Encoders-----------------------------------------------
-#define NUM_ENCODERS 3
+#define NUM_ENCODERS 4
 
 const byte pins[NUM_ENCODERS][2] = {
   //{CLK(white wire), DT(colored wire)}
+  {19, 21},
+  {22, 23},
   {25, 26},
-  {22, 33},
-  {16, 17}
+  {27, 32}
 };
 
 ESP32Encoder encoder[NUM_ENCODERS];
@@ -97,14 +87,8 @@ unsigned long turnDuration[NUM_ENCODERS];
 unsigned long turnStartTime[NUM_ENCODERS];
 
 //-----------------------------------------------End Header-----------------------------------------------
-byte getMemoryContent(byte reader, byte block = 4, byte trailerBlock = 7, byte index = 0); //default location for the card identifier
 
-void handleAll() {
-  checkConnection();
-  ArduinoOTA.handle();
-  client.loop();
-  readAllRFID();
-}
+
 
 void callback(char* topic, byte* payload, unsigned int length) {
   payload[length] = '\0';
@@ -117,8 +101,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println();
 
   if (message == "quit" && modeActive) {
-    client.publish(mainPublishChannel, quitMessage);
     quit = true;
+    client.publish(dataChannel, quitMessage);
   } else if (message == "zero") {
     for (int i = 0; i < NUM_ENCODERS; i++) {
       encoder[i].setCount (0);
@@ -132,106 +116,124 @@ void callback(char* topic, byte* payload, unsigned int length) {
       FastLED.show();
       wait(250);
     }
+  } else if (message == "encoderPositions") {
+    //Create payload that contains each encoder position, example: 55 27 0
+    String outputString;
+    for (int i = 0; i < NUM_ENCODERS; i++) {
+      //Get count
+      currentPosition[i] = (encoder[i].getCount() / 2) % 100;
+
+      //Negative count correction
+      if (currentPosition[i] < 0) {
+        currentPosition[i] = currentPosition[i] + 100;
+      }
+      outputString = outputString + String(currentPosition[i]) + " ";
+    }
+    client.publish(dataChannel, outputString.c_str());
+
   }
 
   if (!modeActive) {
+    modeActive = true;
 
     if (message == "dumpEncoder") {
       client.publish(dataChannel, "Encoder dump mode active");
-      modeActive = true;
       while (!quit) {
         handleAll();
         for (int i = 0; i < NUM_ENCODERS; i++) {
           encoderPosition(i);
         }
       }
-      quit = false;
-      modeActive = false;
 
-    } else if (message == "encoderPositions") {
-      modeActive = true;
-
-      //Create payload that contains each encoder position, example: 55 27 0
-      String outputString;
-      for (int i = 0; i < NUM_ENCODERS; i++) {
-        //Get count
-        currentPosition[i] = (encoder[i].getCount() / 2) % 100;
-
-        //Negative count correction
-        if (currentPosition[i] < 0) {
-          currentPosition[i] = currentPosition[i] + 100;
-        }
-        outputString = outputString + String(currentPosition[i]) + " ";
-      }
-
-      client.publish(dataChannel, outputString.c_str());
-      quit = false;
-      modeActive = false;
     } else if (message == "isTurning") {
       client.publish(dataChannel, "Encoder isTurning mode active");
-      modeActive = true;
       while (!quit) {
         handleAll();
         for (int i = 0; i < NUM_ENCODERS; i++) {
           isTurning(i);
         }
       }
-      quit = false;
-      modeActive = false;
     } else if (message == "followLight") {
-      modeActive = true;
       while (!quit) {
         handleAll();
-        funLights();
+        ringLight();
       }
-      quit = false;
-      modeActive = false;
     } else if (message == "fullLight") {
-      modeActive = true;
       while (!quit) {
         handleAll();
         funLights1();
       }
-      quit = false;
-      modeActive = false;
     }
-
+    quit = false;
+    modeActive = false;
   }
 
 }
 
 void setup () {
-  Serial.begin (115200);
+  Serial.begin(115200);
   //------------------------------------------------------Wifi------------------------------------------------------
-  Serial.setTimeout(500);  // Set time out for
-  setup_wifi();
+  Serial.setTimeout(500);  // Set time out for 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
-  reconnect();
+  WiFi.mode(WIFI_STA);
+  delay(10); 
+  connectToStrongestWiFi();
+  //-----Start MQTT----------------
+  //reconnectMQTT(); This is handled inside connectToStrongestWiFi()
+  //---------------OTA Setup------------------------
+  // Port defaults to 3232
+  // ArduinoOTA.setPort(3232);
 
-  //------------------------------------------------------RFID------------------------------------------------------
-  while (!Serial)
-    ;           // Do nothing if no serial port is opened (added for Arduinos based on ATMEGA32U4)
-  SPI.begin();  // Init SPI bus
+  // Hostname defaults to esp3232-[MAC]
+  ArduinoOTA.setHostname(hostName);
 
-  // Prepare the key (used both as key A and as key B)
-  // using FFFFFFFFFFFFh which is the default at chip delivery from the factory
-  for (byte i = 0; i < 6; i++) {
-    key.keyByte[i] = 0xFF;
-  }
+  // No authentication by default
+  // ArduinoOTA.setPassword("admin");
 
-  for (uint8_t reader = 0; reader < NR_OF_READERS; reader++) {
-    mfrc522[reader].PCD_Init(ssPins[reader], rstPin);  // Init each MFRC522 card
-    Serial.print(F("Reader "));
-    Serial.print(reader);
-    Serial.print(F(": "));
-    mfrc522[reader].PCD_DumpVersionToSerial();
-  }
+  // Password can be set with it's md5 value as well
+  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
+  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
+
+  ArduinoOTA
+  .onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH)
+      type = "sketch";
+    else // U_SPIFFS
+      type = "filesystem";
+
+    // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+    Serial.println("Start updating " + type);
+  })
+  .onEnd([]() {
+    Serial.println("\nEnd");
+  })
+  .onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  })
+  .onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+  ArduinoOTA.begin();
+
+      Serial.println("\nConnected!");
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());
 
   //------------------------------------------------------FastLED------------------------------------------------------
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+  FastLED.addLeds<LED_TYPE, DATA_PIN_AMB, COLOR_ORDER>(ledsAmbient, NUM_LEDS_AMB).setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(BRIGHTNESS);
   FastLED.setMaxPowerInVoltsAndMilliamps(5, MAX_POWER_MILLIAMPS);
+  fill_solid(leds, NUM_LEDS, CHSV(0, 0, 0));
+  FastLED.show();
 
   //------------------------------------------------------Other------------------------------------------------------
   //Initalize each encoder
@@ -243,12 +245,31 @@ void setup () {
 }
 
 void loop () {
+
+  
+  /*
+  for (int i = 0; i < NUM_ENCODERS; i++) {
+    //Get count
+    currentPosition[i] = (encoder[i].getCount() / 2) % 100;
+
+    //Negative count correction
+    if (currentPosition[i] < 0) {
+      currentPosition[i] = currentPosition[i] + 100;
+    }
+  }
+  fill_solid(leds, NUM_LEDS, CHSV(32, 255, 200));
+  leds[map(currentPosition[0], 0, 99, 0, 34)] = CHSV(128, 255, 255);
+  leds[map(currentPosition[1], 0, 99, 35, 69)] = CHSV(128, 255, 255);
+  leds[map(currentPosition[2], 0, 99, 70, 104)] = CHSV(128, 255, 255);
+  leds[map(currentPosition[3], 0, 99, 105, 139)] = CHSV(128, 255, 255);
+  FastLED.show();
+
+*/
   handleAll();
+
 }
 
-
-
-void funLights() {
+void ringLight() {
   for (int i = 0; i < NUM_ENCODERS; i++) {
     //Get count
     currentPosition[i] = (encoder[i].getCount() / 2) % 100;
@@ -259,10 +280,10 @@ void funLights() {
     }
   }
 
-  byte pos = map(currentPosition[0], 0, 99, 0, NUM_LEDS);
+  byte pos = map(currentPosition[0], 0, 99, 0, NUM_LEDS - 1);
   byte hue = map(currentPosition[1], 0, 99, 0, 255);
   byte val = map(currentPosition[2], 0, 99, 0, 255);
-  fadeToBlackBy(leds, NUM_LEDS, 1);
+  fadeToBlackBy(leds, NUM_LEDS, 2);
   leds[pos] = CHSV(hue, 255, val);
   FastLED.show();
 }
@@ -309,6 +330,7 @@ void encoderPosition(byte encoderID) {
 
 void isTurning(byte encoderID) {
   String outputString;
+  byte val;
   //encoderID = which encoder you want to know about (0,1,2 etc.)
 
   //Get count
@@ -355,68 +377,17 @@ void isTurning(byte encoderID) {
 }
 
 //------------------------------------------------------Service functions------------------------------------------------------
-void setup_wifi() {
-  delay(10);
-  Serial.println("Booting");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("Connection Failed! Rebooting...");
-    delay(5000);
-    ESP.restart();
-  }
-
-  // Port defaults to 3232
-  // ArduinoOTA.setPort(3232);
-
-  // Hostname defaults to esp3232-[MAC]
-  ArduinoOTA.setHostname(hostName);
-
-  // No authentication by default
-  // ArduinoOTA.setPassword("admin");
-
-  // Password can be set with it's md5 value as well
-  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
-  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
-
-  ArduinoOTA
-  .onStart([]() {
-    String type;
-    if (ArduinoOTA.getCommand() == U_FLASH)
-      type = "sketch";
-    else // U_SPIFFS
-      type = "filesystem";
-
-    // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-    Serial.println("Start updating " + type);
-  })
-  .onEnd([]() {
-    Serial.println("\nEnd");
-  })
-  .onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-  })
-  .onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
-  });
-
-  ArduinoOTA.begin();
-
-  Serial.println("Ready");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-
+void handleAll() {
+  checkConnection();
+  ArduinoOTA.handle();
+  client.loop();
 }
 
-void reconnect() {
-  SPI.end();
+void reconnectMQTT() {
+  //if (usingSpiBus){SPI.end();
+  //}
   // Loop until we're reconnected
-  while (!client.connected()) {
+  while (!client.connected() && (WiFi.status() == WL_CONNECTED)) {
     Serial.print("Attempting MQTT connection...");
     byte mac[5];
     WiFi.macAddress(mac);  // get mac address
@@ -425,7 +396,13 @@ void reconnect() {
     if (client.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("connected");
       //Once connected, publish an announcement...
+      if (espJustReset){//if this is the first connection after a reset or first power on
+        espJustReset = false;
+        client.publish(mainPublishChannel, bootMessage);
+      }
+      else{
       client.publish(mainPublishChannel, onlineMessage);
+      }
       // ... and resubscribe
       for (int i = 0; i < NUM_SUBSCRIPTIONS; i++) {
         client.subscribe(subscribeChannel[i]);
@@ -438,7 +415,9 @@ void reconnect() {
       wait(5000);
     }
   }
-  SPI.begin();  // Init SPI bus
+  //if (usingSpiBus){    SPI.begin();// Init SPI bus
+  //}
+    
 }
 
 void checkConnection() {
@@ -449,16 +428,18 @@ void checkConnection() {
     Serial.println("Reconnecting to WiFi...");
     WiFi.disconnect();
     delay(100);
-    WiFi.begin(ssid, password);
-    //WiFi.reconnect();
+    connectToStrongestWiFi();   
     previousMillis = currentMillis;
   }
   if ((!client.connected() ) && (WiFi.status() == WL_CONNECTED) ) {
     Serial.println("Lost mqtt connection");
-    reconnect();
+    reconnectMQTT();
   }
   if ((currentMillis - previousMillis >= interval)) {
     client.publish(watchdogChannel, watchdogMessage);
+    reportFreeHeap();
+    publishRSSI();
+    publishWiFiChannel();
     previousMillis = currentMillis;
 
   }
@@ -474,83 +455,93 @@ void wait(uint16_t msWait) {
   }
 }
 
-void readAllRFID() {
-  String output;
-  for (byte reader = 0; reader < NR_OF_READERS; reader++) {
-    funLights();
-    if (mfrc522[reader].PICC_IsNewCardPresent() && mfrc522[reader].PICC_ReadCardSerial()) {
-      currentRFIDinput[reader] = getMemoryContent(reader);
-    } else {
-      currentRFIDinput[reader] = 0;
-    }
+// Function to connect to the strongest WiFi network
+void connectToStrongestWiFi() {
+  int n = WiFi.scanNetworks();
 
+  if (n == 0) {
+    Serial.println("No networks found");
+    return;
+  }
 
-    if (currentRFIDinput[reader] != lastRFIDinput[reader]) {
-      for (byte i = 0; i < NR_OF_READERS; i++) {
-        output = output + String(currentRFIDinput[i]) + " ";
-        Serial.print(currentRFIDinput[i]);
-        Serial.print(" ");
+  int strongestSignal = -1000;  // Initialize to a very low signal strength
+  String bestSSID = "";
+  String bestBSSID = "";
+
+  Serial.println("Scan complete.");
+  for (int i = 0; i < n; i++) {
+    String foundSSID = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+    String bssid = WiFi.BSSIDstr(i);
+
+    if (foundSSID == ssid) {
+      Serial.printf("Found SSID: %s, Signal strength: %d dBm, BSSID: %s\n", foundSSID.c_str(), rssi, bssid.c_str());
+
+      if (rssi > strongestSignal) {
+        strongestSignal = rssi;
+        bestSSID = foundSSID;
+        bestBSSID = bssid;
       }
-      Serial.println();
-//      if (currentRFIDinput[reader] == 0) {
-//        //disable this if you don't need a separate message for "card removed"
-//        client.publish(dataChannel, String("Card " + String(lastRFIDinput[reader]) + " removed").c_str());
-//        //Serial.println(String("Card " + String(lastRFIDinput[reader]) + " removed"));
-//      }
-      client.publish(dataChannel, output.c_str());
-      lastRFIDinput[reader] = currentRFIDinput[reader];
+    }
+  }
+
+  if (bestSSID != "") {
+    Serial.printf("Connecting to strongest network: %s with BSSID: %s\n", bestSSID.c_str(), bestBSSID.c_str());
+
+    WiFi.begin(bestSSID.c_str(), password);
+
+    // Wait for connection
+    int tries = 0;
+    while (WiFi.status() != WL_CONNECTED && tries < 5) {
+      delay(1500);
+      Serial.print(".");
+      tries++;
     }
 
-  }//for
-}
-
-byte getMemoryContent(byte reader, byte block, byte trailerBlock, byte index) {
-  //mfrc522[reader].PCD_Init();
-
-  //trailerBlock is the highest block in the sector, for example, block 0 is in sector 0, so its trailerBlock is block 3. Block 3's trailerBlock is also block 3.
-  //block goes from 0 - 63
-  //index goes from 0 - 15
-  byte readBuffer[18];
-  byte readBufferSize = sizeof(readBuffer);
-  MFRC522::StatusCode status;
-
-  // Authenticate using key A
-  //Serial.println(F("Authenticating using key A..."));
-  status = (MFRC522::StatusCode) mfrc522[reader].PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522[reader].uid));
-  if (status != MFRC522::STATUS_OK) {
-    Serial.print(F("PCD_Authenticate() failed: "));
-    Serial.println(mfrc522[reader].GetStatusCodeName(status));
-    return 0;
+    if (WiFi.status() == WL_CONNECTED) {
+      reconnectMQTT();
+      publishWiFiInfo();
+      //ArduinoOTA.begin();
+      
+    } else {
+      Serial.println("\nFailed to connect.");
+      ESP.restart();
+    }
+  } else {
+    Serial.println("No matching SSID found.");
   }
-
-  //read block
-  mfrc522[reader].MIFARE_Read(block, readBuffer, &readBufferSize);
-
-  //print stuff
-  //  dump_byte_array(readBuffer, 16, block);
-  //  Serial.print(String("Value in block " + String(block) + ", index " + index + ": "));
-  //  Serial.println(readBuffer[index]);
-
-  // Halt PICC
-  mfrc522[reader].PICC_HaltA();
-  // Stop encryption on PCD
-  mfrc522[reader].PCD_StopCrypto1();
-  mfrc522[reader].PCD_Reset();
-  mfrc522[reader].PCD_Init();
-
-
-  return readBuffer[index];
 }
+// Function to report the free heap memory over MQTT
+void reportFreeHeap() {
+  uint32_t freeHeap = ESP.getFreeHeap();  // Get free heap memory
+  // Publish the heap memory data to the MQTT topic
+  client.publish(dataChannel2,String("FreeMemory:" +  String(freeHeap)).c_str());
+  //Serial.print("Published free heap: ");
+  //Serial.println(heapStr);  // Print to Serial for debugging
+}
+void publishRSSI() {
+  int rssi = WiFi.RSSI();  
+  client.publish(dataChannel2, String("RSSI:" + String(rssi)).c_str());
+}
+void publishWiFiChannel() {
+  int channel = WiFi.channel();  
+  client.publish(dataChannel2, String("Channel:" + String(channel)).c_str());  
+}
+// Function to publish WiFi info (SSID and BSSID) via MQTT
+void publishWiFiInfo() {
+  if (WiFi.status() == WL_CONNECTED) {
+    String connectedSSID = WiFi.SSID();         // Get SSID
+    String connectedBSSID = WiFi.BSSIDstr();    // Get BSSID
 
+    // Create MQTT message
+    String message = "Connected to SSID: " + connectedSSID + ", BSSID: " + connectedBSSID;
 
-//Helper routine to dump a byte array as hex values to Serial.
+    // Publish message to MQTT
+    client.publish(dataChannel2, message.c_str());
 
-void dump_byte_array(byte * buffer, byte bufferSize, byte block) {
-  Serial.println(String("Block " + String(block) + " content:"));
-  for (byte i = 0; i < bufferSize; i++) {
-    Serial.print(buffer[i] < 0x10 ? " 0" : " ");
-    Serial.print(buffer[i], HEX);
+    //Serial.println("Published WiFi info to MQTT:");
+    //Serial.println(message);
+  } else {
+    //Serial.println("Not connected to any WiFi network.");
   }
-  Serial.println();
-  return;
 }

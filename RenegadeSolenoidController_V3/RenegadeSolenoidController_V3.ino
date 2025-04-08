@@ -3,8 +3,30 @@
 #include <SPI.h>
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
-#include <FastLED.h>
 #include <ArduinoOTA.h>
+#include <Wire.h>
+
+//-----------------------------------------------------------IO Extender board-----------------------------------------------------------
+#define PCF8575_ADDR 0x20  // Replace with the actual address if different (Our boards require some soldering to change address)
+
+// Define symbolic constants for each pin on the PCF8575
+#define P00 0
+#define P01 1
+#define P02 2
+#define P03 3
+#define P04 4
+#define P05 5
+#define P06 6
+#define P07 7
+#define P10 8
+#define P11 9
+#define P12 10
+#define P13 11
+#define P14 12
+#define P15 13
+#define P16 14
+#define P17 15
+uint16_t pcf8575State = 0xFFFF;  // Initialize all pins to HIGH (all off)
 
 //-----------------------------------------------------------WiFi,MQTT,OTA-----------------------------------------------------------
 const char* ssid = "Control booth";
@@ -20,19 +42,19 @@ const long interval = 20000;           // interval at which to send mqtt watchdo
 
 bool usingSpiBus = false; //Change to true if using spi bus
 //Base notifications
-const char* hostName = "Center Wall LEDs"; // Set your controller unique name here
-const char* quitMessage = "Center Wall LEDs quitting...";
-const char* onlineMessage = "Center Wall LEDs Online";
-const char* watchdogMessage = "Center Wall LEDs Watchdog";
+const char* hostName = "Renegade Solenoid Controller"; // Set your controller unique name here
+const char* quitMessage = "Renegade Solenoid Controller quitting...";
+const char* onlineMessage = "Renegade Solenoid Controller Online";
+const char* watchdogMessage = "Renegade Solenoid Controller Watchdog";
 
 //mqtt Topics
 #define NUM_SUBSCRIPTIONS 1
 const char* mainPublishChannel = "/Renegade/Engineering/"; //typically /Renegade/Room1/ or /Renegade/Engineering/
-const char* dataChannel = "/Renegade/CenterWallLEDs/data/";
-const char* dataChannel2 = "/Renegade/CenterWallLEDs/data/Health/";
+const char* dataChannel = "/Renegade/Engineering/Solenoid/";
+const char* dataChannel2 = "/Renegade/Engineering/Solenoid/Health/";
 const char* watchdogChannel = "/Renegade/Engineering/";
 const char* subscribeChannel[NUM_SUBSCRIPTIONS] = {
-  "/Renegade/CenterWallLEDs/Control/",
+  "/Renegade/Engineering/Solenoid/Control/",
   //"myTopic0",
   //"myTopic1",
   //more subscriptions can be added here, separated by commas
@@ -40,22 +62,6 @@ const char* subscribeChannel[NUM_SUBSCRIPTIONS] = {
 
 WiFiClient wifiClient;
 PubSubClient client(wifiClient);
-
-//-----------------------------------------------FastLED-----------------------------------------------
-#define DATA_PIN    33
-#define DATA_PIN1    32
-#define DATA_PINV6   27
-#define LED_TYPE    WS2812B
-#define COLOR_ORDER GRB
-#define NUM_LEDS    108
-#define NUM_LEDS_V6 293
-
-CRGB leds[NUM_LEDS];
-CRGB leds1[NUM_LEDS];
-CRGB ledsV6[NUM_LEDS_V6];
-
-#define BRIGHTNESS         255
-#define FRAMES_PER_SECOND  120
 
 //-----------------------------------------------Mode Logic-----------------------------------------------
 boolean modeActive = false;
@@ -78,52 +84,56 @@ void callback(char* topic, byte* payload, unsigned int length) {
     client.publish(mainPublishChannel, quitMessage);
     quit = true;
   }
-
+ else if (message == "openDoor"){ 
+  digitalWrite8575(P00, LOW);
+  wait(50);
+  digitalWrite8575(P00, HIGH);
+ }
+ else if (message == "closeDoor"){ 
+  digitalWrite8575(P02, LOW);
+  wait(50);
+  digitalWrite8575(P02, HIGH);
+ }
+ else if (message == "centerDoor"){ 
+  digitalWrite8575(P01, LOW);
+  wait(50);
+  digitalWrite8575(P01, HIGH);
+ }
+ else if (message == "extendSlide"){ 
+  digitalWrite8575(P06, LOW);  
+ }
+ else if (message == "retractSlide"){ 
+  digitalWrite8575(P06, HIGH);  
+ }
+ else if (message == "extendDrawer1"){ 
+  digitalWrite8575(P07, LOW);  
+ }
+ else if (message == "retractDrawer1"){ 
+  digitalWrite8575(P07, HIGH);  
+ }
+ else if (message == "extendDrawer2"){ 
+  digitalWrite8575(P10, LOW);  
+ }
+ else if (message == "retractDrawer2"){ 
+  digitalWrite8575(P10, HIGH);  
+ }
+ else if (message == "openGarage"){ 
+  digitalWrite8575(P17, LOW);  
+ }
+ else if (message == "closeGarage"){ 
+  digitalWrite8575(P17, HIGH);  
+ }
   if (!modeActive) {
-    //Consider Refactoring this
-    if (message == "ambient") {
+
+    if (message == "myMode1") {
       modeActive = true;
-      while (!quit) {
-        handleAll();
-        byte speed = 20;
-
-        leds[beatsin8(speed, 0, 53)] = CHSV(128, 255, 255);
-        leds[beatsin8(speed, 54, 107)] = CHSV(128, 255, 255);
-
-        leds[beatsin8(speed + 2, 0, 53)] = CHSV(180, 255, 255);
-        leds[beatsin8(speed + 2, 54, 107)] = CHSV(180, 255, 255);
-
-        leds[beatsin8(speed + 4, 0, 53)] = CHSV(115, 255, 255);
-        leds[beatsin8(speed + 4, 54, 107)] = CHSV(115, 255, 255);
-        fadeToBlackBy(leds, NUM_LEDS, 2);
-
-        leds1[beatsin8(speed + 1, 0, 53)] = CHSV(150, 255, 255);
-        leds1[beatsin8(speed + 1, 54, 107)] = CHSV(150, 255, 255);
-
-        leds1[beatsin8(speed + 3, 0, 53)] = CHSV(175, 255, 255);
-        leds1[beatsin8(speed + 3, 54, 107)] = CHSV(175, 255, 255);
-
-        leds1[beatsin8(speed + 5, 0, 53)] = CHSV(120, 255, 255);
-        leds1[beatsin8(speed + 5, 54, 107)] = CHSV(120, 255, 255);
-        fadeToBlackBy(leds1, NUM_LEDS, 2);
-
-        FastLED.show();
-      }
+      //add more modes here
       quit = false;
       modeActive = false;
 
-    } else if (message == "doorActivity") {
+    } else if (message == "myNewMode") {
       modeActive = true;
-      client.publish(mainPublishChannel, "Door Activity CMD Recieved");
-      //for (int i = 0; i < 500; i++) {
-      while (!quit) {
-        fill_gradient(ledsV6, 210, CHSV(128, 255, 255), NUM_LEDS_V6 - 1, CHSV(128, 255, 255));
-        FastLED.show();
-        wait(250);
-        fill_gradient(ledsV6, 210, CHSV(128, 255, 0), NUM_LEDS_V6 - 1, CHSV(128, 255, 0));
-        FastLED.show();
-        wait(250);
-      }
+      //add more modes here
       quit = false;
       modeActive = false;
     }
@@ -132,20 +142,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
 }
 
-void setup() {  
-
-  //------------------------------------------------------FastLED------------------------------------------------------
-  // tell FastLED about the LED strip configuration
-  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-  FastLED.addLeds<LED_TYPE, DATA_PIN1, COLOR_ORDER>(leds1, NUM_LEDS).setCorrection(TypicalLEDStrip);
-  FastLED.addLeds<LED_TYPE, DATA_PINV6, COLOR_ORDER>(ledsV6, NUM_LEDS_V6).setCorrection(TypicalLEDStrip);
-  //FastLED.addLeds<LED_TYPE,DATA_PIN,CLK_PIN,COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-
-  // set master brightness control
-  FastLED.setBrightness(BRIGHTNESS);
-  fill_solid( leds, NUM_LEDS, CHSV(0, 0, 0));
-  fill_solid( leds1, NUM_LEDS, CHSV(0, 0, 0));
-  FastLED.show();
+void setup() {
+  
+    //------------------------------------------------------IO Expansion board------------------------------------------------------
+  Wire.begin();               // Initialize I2C bus
+  writePCF8575(pcf8575State); // Initialize all pins to HIGH
 
   Serial.begin(115200);
   //------------------------------------------------------Wifi------------------------------------------------------
@@ -207,21 +208,16 @@ void setup() {
 
 void loop() {
   handleAll();
-  fill_solid(ledsV6, NUM_LEDS_V6, CHSV(beatsin8(60), 255, 80));
-  //  fill_solid(leds, NUM_LEDS, CHSV(0, 255, beatsin8(30, 0, 255)));
-  //  fill_solid(leds1, NUM_LEDS, CHSV(0, 255, beatsin8(30, 0, 255, 375)));
 
-  fill_solid(leds, NUM_LEDS, CHSV(0, 255, 255));
-  fill_solid(leds1, NUM_LEDS, CHSV(0, 255, 0));
-  FastLED.show();
-
-  wait(1000);
-
-  fill_solid(leds, NUM_LEDS, CHSV(0, 255, 0));
-  fill_solid(leds1, NUM_LEDS, CHSV(0, 255, 255));
-  FastLED.show();
-
-  wait(1000);
+  /*
+  // Example usage for IO Extender: toggle two pins. Remember you are sinking current, so writing HIGH will turn the output OFF.
+  digitalWrite8575(P00, HIGH);
+  digitalWrite8575(P17, HIGH);
+  wait(500);
+  digitalWrite8575(P00, LOW);
+  digitalWrite8575(P17, LOW);
+  wait(500);
+  */
 }
 
 
@@ -230,6 +226,41 @@ void loop() {
 
 
 
+
+
+// Function to write to a specific pin on the PCF8575
+void digitalWrite8575(uint8_t pin, uint8_t value) {
+  if (pin > 15) return;  // Ignore invalid pins
+
+  // Update the bit in pcf8575State according to the pin and value
+  if (value == HIGH) {
+    pcf8575State |= (1 << pin);   // Set the corresponding bit to 1
+  } else {
+    pcf8575State &= ~(1 << pin);  // Clear the corresponding bit to 0
+  }
+
+  // Write the updated state to the PCF8575
+  writePCF8575(pcf8575State);
+}
+
+// Function to write 16-bit data to PCF8575
+void writePCF8575(uint16_t data) {
+  Wire.beginTransmission(PCF8575_ADDR);
+  Wire.write(data & 0xFF);        // Write lower 8 bits
+  Wire.write((data >> 8) & 0xFF); // Write upper 8 bits
+  Wire.endTransmission();
+}
+
+// Function to read 16-bit data from PCF8575 (if needed)
+uint16_t readPCF8575() {
+  Wire.requestFrom(PCF8575_ADDR, 2);  // Request 2 bytes from PCF8575
+  if (Wire.available() == 2) {
+    uint8_t lowByte = Wire.read();    // Read lower byte
+    uint8_t highByte = Wire.read();   // Read upper byte
+    return (highByte << 8) | lowByte; // Combine into 16-bit value
+  }
+  return 0;  // Return 0 if no data available
+}
 //------------------------------------------------------Service functions------------------------------------------------------
 void handleAll() {
   checkConnection();
@@ -238,8 +269,8 @@ void handleAll() {
 }
 
 void reconnectMQTT() {
-  if (usingSpiBus){SPI.end();
-  }
+  //if (usingSpiBus){SPI.end();
+  //}
   // Loop until we're reconnected
   while (!client.connected() && (WiFi.status() == WL_CONNECTED)) {
     Serial.print("Attempting MQTT connection...");
@@ -263,9 +294,8 @@ void reconnectMQTT() {
       wait(5000);
     }
   }
-  if (usingSpiBus){
-    SPI.begin();// Init SPI bus
-  }
+  //if (usingSpiBus){  SPI.begin();// Init SPI bus
+  //}
     
 }
 
